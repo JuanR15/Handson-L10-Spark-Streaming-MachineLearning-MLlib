@@ -1,8 +1,3 @@
-import os
-
-os.environ["HADOOP_HOME"] = r"C:\hadoop"
-os.environ["PATH"] = r"C:\hadoop\bin;" + os.environ["PATH"]
-
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import from_json, col, avg, window, hour, minute
 from pyspark.sql.types import StructType, StructField, StringType, IntegerType, DoubleType, TimestampType
@@ -68,8 +63,8 @@ parsed_stream = raw_stream.select(
 )
 
 windowed_df = parsed_stream \
-    .withWatermark("event_time", "1 minute") \
-    .groupBy(window(col("event_time"), "5 minutes", "1 minute")) \
+    .withWatermark("event_time", "5 seconds") \
+    .groupBy(window(col("event_time"), "20 seconds", "10 seconds")) \
     .agg(avg("fare_amount").alias("avg_fare"))
 
 windowed_features = windowed_df \
@@ -89,7 +84,7 @@ output = predictions.select(
 
 query = output.writeStream \
     .format("console") \
-    .outputMode("append") \
+    .outputMode("update") \
     .option("truncate", False) \
     .start()
 
