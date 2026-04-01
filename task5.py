@@ -1,101 +1,93 @@
-
 import os
+
+os.environ["HADOOP_HOME"] = r"C:\hadoop"
+os.environ["PATH"] = r"C:\hadoop\bin;" + os.environ["PATH"]
+
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import from_json, col, avg, window, hour, minute
 from pyspark.sql.types import StructType, StructField, StringType, IntegerType, DoubleType, TimestampType
+from pyspark.ml.feature import VectorAssembler
+from pyspark.ml.regression import LinearRegression
 
-# TODO: Import VectorAssembler, LinearRegression, and LinearRegressionModel from pyspark.ml
-
-# Initialize Spark Session
-spark = SparkSession.builder.appName("Task7_FareTrendPrediction_Assignment").getOrCreate()
-spark.sparkContext.setLogLevel("WARN")
-
-# Paths
-MODEL_PATH = "models/fare_trend_model_v2"
 TRAINING_DATA_PATH = "training-dataset.csv"
 
-# ------------------- MODEL TRAINING (Offline) ------------------- #
-if not os.path.exists(MODEL_PATH):
-    print(f"\n[Training Phase] Training new model with feature engineering using {TRAINING_DATA_PATH}...")
+spark = SparkSession.builder \
+    .appName("Task5_FareTrendPrediction") \
+    .master("local[*]") \
+    .getOrCreate()
 
-    # Load and process historical data
-    hist_df_raw = spark.read.csv(TRAINING_DATA_PATH, header=True, inferSchema=False)
-    hist_df_processed = hist_df_raw.withColumn("event_time", col("timestamp").cast(TimestampType())) \
-                                   .withColumn("fare_amount", col("fare_amount").cast(DoubleType()))
+spark.sparkContext.setLogLevel("ERROR")
 
-    # TODO: Aggregate data into 5-minute time windows, calculating the average fare.
-    # HINT: Use groupBy(window(...)) and agg(avg(...)).
-    hist_windowed_df = None # Replace None with your implementation
+print("[Training] Training trend model...")
 
-    # TODO: Engineer time-based features from the window's start time.
-    # Add two new columns: 'hour_of_day' and 'minute_of_hour'.
-    # HINT: Use withColumn and the hour() and minute() functions on `col("window.start")`.
-    hist_features = None # Replace None with your implementation
+hist_df = spark.read.csv(TRAINING_DATA_PATH, header=True, inferSchema=True) \
+    .withColumn("event_time", col("timestamp").cast(TimestampType())) \
+    .withColumn("fare_amount", col("fare_amount").cast(DoubleType()))
 
-    # TODO: Create a VectorAssembler for the new time-based features.
-    # Input columns should be "hour_of_day" and "minute_of_hour".
-    assembler = None # Replace None with your implementation
-    train_df = None # Replace None with your implementation
+hist_windowed = hist_df.groupBy(
+    window(col("event_time"), "5 minutes")
+).agg(
+    avg("fare_amount").alias("avg_fare")
+)
 
-    # TODO: Create and train the LinearRegression model.
-    # The label column is 'avg_fare'.
-    lr = None # Replace None with your implementation
-    model = None # Replace None with your implementation
+hist_features = hist_windowed \
+    .withColumn("hour_of_day", hour(col("window.start")).cast(DoubleType())) \
+    .withColumn("minute_of_hour", minute(col("window.start")).cast(DoubleType()))
 
-    # TODO: Save the trained model.
-    print(f"[Model Saved] -> {MODEL_PATH}")
-else:
-    print(f"[Model Found] Using existing model at {MODEL_PATH}")
+assembler = VectorAssembler(
+    inputCols=["hour_of_day", "minute_of_hour"],
+    outputCol="features"
+)
 
+train_df = assembler.transform(hist_features)
 
-# ------------------- STREAMING INFERENCE ------------------- #
-print("\n[Inference Phase] Starting real-time trend prediction stream...")
+lr = LinearRegression(featuresCol="features", labelCol="avg_fare")
+trend_model = lr.fit(train_df)
 
-# Define the schema for incoming data
+print("[Training Complete] Trend model trained in memory.")
+
 schema = StructType([
-    StructField("trip_id", StringType()),
-    StructField("driver_id", IntegerType()),
-    StructField("distance_km", DoubleType()),
-    StructField("fare_amount", DoubleType()),
-    StructField("timestamp", StringType())
+    StructField("trip_id", IntegerType(), True),
+    StructField("driver_id", IntegerType(), True),
+    StructField("distance_km", DoubleType(), True),
+    StructField("fare_amount", DoubleType(), True),
+    StructField("timestamp", StringType(), True)
 ])
 
-# Read from socket and parse data
-raw_stream = spark.readStream.format("socket").option("host", "localhost").option("port", 9999).load()
-parsed_stream = raw_stream.select(from_json(col("value"), schema).alias("data")).select("data.*") \
-    .withColumn("event_time", col("timestamp").cast(TimestampType()))
+raw_stream = spark.readStream \
+    .format("socket") \
+    .option("host", "localhost") \
+    .option("port", 9999) \
+    .load()
 
-# Add a watermark to handle late-arriving data
-parsed_stream = parsed_stream.withWatermark("event_time", "1 minute")
+parsed_stream = raw_stream.select(
+    from_json(col("value"), schema).alias("data")
+).select("data.*").withColumn(
+    "event_time",
+    col("timestamp").cast(TimestampType())
+)
 
-# TODO: Apply the same 5-minute windowed aggregation to the stream.
-# The window should slide every 1 minute.
-windowed_df = None # Replace None with your implementation
+windowed_df = parsed_stream \
+    .withWatermark("event_time", "1 minute") \
+    .groupBy(window(col("event_time"), "5 minutes", "1 minute")) \
+    .agg(avg("fare_amount").alias("avg_fare"))
 
-# TODO: Apply the same feature engineering to the streaming windowed data.
-# Create 'hour_of_day' and 'minute_of_hour' columns.
-windowed_features = None # Replace None with your implementation
+windowed_features = windowed_df \
+    .withColumn("hour_of_day", hour(col("window.start")).cast(DoubleType())) \
+    .withColumn("minute_of_hour", minute(col("window.start")).cast(DoubleType()))
 
-# TODO: Create a VectorAssembler for the streaming features. It must match the one from training.
-assembler_inference = None # Replace None with your implementation
-feature_df = None # Replace None with your implementation
+feature_df = assembler.transform(windowed_features)
 
-# TODO: Load the pre-trained regression model from MODEL_PATH.
-trend_model = None # Replace None with your implementation
+predictions = trend_model.transform(feature_df)
 
-# TODO: Use the model to make predictions on the streaming features.
-predictions = None # Replace None with your implementation
-
-# Select final columns for output
-output_df = predictions.select(
+output = predictions.select(
     col("window.start").alias("window_start"),
     col("window.end").alias("window_end"),
     "avg_fare",
     col("prediction").alias("predicted_next_avg_fare")
 )
 
-# Write predictions to the console
-query = output_df.writeStream \
+query = output.writeStream \
     .format("console") \
     .outputMode("append") \
     .option("truncate", False) \
